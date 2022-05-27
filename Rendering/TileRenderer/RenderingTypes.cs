@@ -1,117 +1,389 @@
 using Mapster.Common.MemoryMappedTypes;
+using SixLabors.Fonts;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Drawing.Processing;
-using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
 
 namespace Mapster.Rendering;
 
-public static class TileRenderer
+public struct GeoFeature : BaseShape
 {
-    public static BaseShape Tessellate(this MapFeatureData feature, ref BoundingBox boundingBox, ref PriorityQueue<BaseShape, int> shapes)
+    public enum GeoFeatureType
     {
-        BaseShape? baseShape = null;
+        Plain,
+        Hills,
+        Mountains,
+        Forest,
+        Desert,
+        Unknown,
+        Water,
+        Residential
+    }
 
-        var featureType = feature.Type;
-        var coordinates = feature.Coordinates;
-        if (Road.isRoad(feature))
+    public int ZIndex
+    {
+        get
         {
-            baseShape = new Road(coordinates);
-        }
-        else if (Waterway.isWaterway(feature))
-        {
-            baseShape = new Waterway(coordinates, feature.Type == GeometryType.Polygon);
-        }
-        else if (Border.isBorder(feature))
-        {
-            baseShape = new Border(coordinates);
-        }
-        else if (PopulatedPlace.isPopulatedPlace(feature))
-        {
-            baseShape = new PopulatedPlace(coordinates, feature);
-        }
-        else if (Railway.isRailway(feature))
-        {
-            baseShape = new Railway(coordinates);
-        }
-        else if (GeoFeature.isNatural(feature))
-        {
-            baseShape = new GeoFeature(coordinates, feature);
-        }
-        else if (GeoFeature.isForest(feature))
-        {
-            baseShape = new GeoFeature(coordinates, GeoFeature.GeoFeatureType.Forest);
-        }
-        else if (GeoFeature.isLanduseForestOrOrchad(feature))
-        {
-            baseShape = new GeoFeature(coordinates, GeoFeature.GeoFeatureType.Forest);
-        }
-        else if (GeoFeature.isLanduseResidential(feature))
-        {
-            baseShape = new GeoFeature(coordinates, GeoFeature.GeoFeatureType.Residential);
-        }
-        else if (GeoFeature.isLandusePlain(feature))
-        {
-            baseShape = new GeoFeature(coordinates, GeoFeature.GeoFeatureType.Plain);
-        }
-        else if (GeoFeature.isWater(feature))
-        {
-            baseShape = new GeoFeature(coordinates, GeoFeature.GeoFeatureType.Water);
-        }
-        else if (GeoFeature.isBuilding(feature))
-        {
-            baseShape = new GeoFeature(coordinates, GeoFeature.GeoFeatureType.Residential);
-        }
-        else if (GeoFeature.isLeisure(feature))
-        {
-            baseShape = new GeoFeature(coordinates, GeoFeature.GeoFeatureType.Residential);
-        }
-        else if (GeoFeature.isAmenity(feature))
-        {
-            baseShape = new GeoFeature(coordinates, GeoFeature.GeoFeatureType.Residential);
-        }
-
-        if (baseShape != null)
-        {
-            shapes.Enqueue(baseShape, baseShape.ZIndex);
-            for (var j = 0; j < baseShape.ScreenCoordinates.Length; ++j)
+            switch (Type)
             {
-                boundingBox.MinX = Math.Min(boundingBox.MinX, baseShape.ScreenCoordinates[j].X);
-                boundingBox.MaxX = Math.Max(boundingBox.MaxX, baseShape.ScreenCoordinates[j].X);
-                boundingBox.MinY = Math.Min(boundingBox.MinY, baseShape.ScreenCoordinates[j].Y);
-                boundingBox.MaxY = Math.Max(boundingBox.MaxY, baseShape.ScreenCoordinates[j].Y);
+                case GeoFeatureType.Plain:
+                    return 10;
+                case GeoFeatureType.Hills:
+                    return 12;
+                case GeoFeatureType.Mountains:
+                    return 13;
+                case GeoFeatureType.Forest:
+                    return 11;
+                case GeoFeatureType.Desert:
+                    return 9;
+                case GeoFeatureType.Unknown:
+                    return 8;
+                case GeoFeatureType.Water:
+                    return 40;
+                case GeoFeatureType.Residential:
+                    return 41;
+            }
+
+            return 7;
+        }
+        set { }
+    }
+
+    public bool IsPolygon { get; set; }
+    public PointF[] ScreenCoordinates { get; set; }
+    public GeoFeatureType Type { get; set; }
+
+    public void Render(IImageProcessingContext context)
+    {
+        var color = Color.Magenta;
+        switch (Type)
+        {
+            case GeoFeatureType.Plain:
+                color = Color.LightGreen;
+                break;
+            case GeoFeatureType.Hills:
+                color = Color.DarkGreen;
+                break;
+            case GeoFeatureType.Mountains:
+                color = Color.LightGray;
+                break;
+            case GeoFeatureType.Forest:
+                color = Color.Green;
+                break;
+            case GeoFeatureType.Desert:
+                color = Color.SandyBrown;
+                break;
+            case GeoFeatureType.Unknown:
+                color = Color.Magenta;
+                break;
+            case GeoFeatureType.Water:
+                color = Color.LightBlue;
+                break;
+            case GeoFeatureType.Residential:
+                color = Color.LightCoral;
+                break;
+        }
+
+        if (!IsPolygon)
+        {
+            var pen = new Pen(color, 1.2f);
+            context.DrawLines(pen, ScreenCoordinates);
+        }
+        else
+        {
+            context.FillPolygon(color, ScreenCoordinates);
+        }
+    }
+
+    public GeoFeature(ReadOnlySpan<Coordinate> c, GeoFeatureType type)
+    {
+        IsPolygon = true;
+        Type = type;
+        ScreenCoordinates = new PointF[c.Length];
+        for (var i = 0; i < c.Length; i++)
+            ScreenCoordinates[i] = new PointF((float)MercatorProjection.lonToX(c[i].Longitude),
+                (float)MercatorProjection.latToY(c[i].Latitude));
+    }
+
+    public GeoFeature(ReadOnlySpan<Coordinate> c, MapFeatureData feature)
+    {
+        IsPolygon = feature.Type == GeometryType.Polygon;
+        var natural = feature.Properties.natural;
+        Type = GeoFeatureType.Unknown;
+        if (natural != PropertyManager.Natural.UNSET)
+        {
+            if (natural == PropertyManager.Natural.FELL ||
+                natural == PropertyManager.Natural.GRASSLAND ||
+                natural == PropertyManager.Natural.HEATH ||
+                natural == PropertyManager.Natural.MOOR ||
+                natural == PropertyManager.Natural.SCRUB ||
+                natural == PropertyManager.Natural.WETLAND)
+            {
+                Type = GeoFeatureType.Plain;
+            }
+            else if (natural == PropertyManager.Natural.WOOD || 
+                     natural == PropertyManager.Natural.TREE_ROW)
+            {
+                Type = GeoFeatureType.Forest;
+            }
+            else if (natural == PropertyManager.Natural.BARE_ROCK || 
+                     natural == PropertyManager.Natural.ROCK ||
+                     natural == PropertyManager.Natural.SCREE)
+            {
+                Type = GeoFeatureType.Mountains;
+            }
+            else if (natural == PropertyManager.Natural.BEACH ||
+                     natural == PropertyManager.Natural.SAND)
+            {
+                Type = GeoFeatureType.Desert;
+            }
+            else if (natural == PropertyManager.Natural.WATER)
+            {
+                Type = GeoFeatureType.Water;
             }
         }
 
-        return baseShape;
+        ScreenCoordinates = new PointF[c.Length];
+        for (var i = 0; i < c.Length; i++)
+            ScreenCoordinates[i] = new PointF((float)MercatorProjection.lonToX(c[i].Longitude),
+                (float)MercatorProjection.latToY(c[i].Latitude));
     }
 
-    public static Image<Rgba32> Render(this PriorityQueue<BaseShape, int> shapes, BoundingBox boundingBox, int width, int height)
+    public static bool isNatural(MapFeatureData feature) {
+        return feature.Type == GeometryType.Polygon && feature.Properties.natural != PropertyManager.Natural.UNSET;  
+    }
+
+    public static bool isForest(MapFeatureData feature) {
+        return feature.Properties.boundary == PropertyManager.Boundary.FOREST;
+    }
+
+    public static bool isLanduseForestOrOrchad(MapFeatureData feature) {
+        return feature.Properties.landuse == PropertyManager.Landuse.FOREST || feature.Properties.landuse == PropertyManager.Landuse.ORCHARD;
+    }
+
+    public static bool isLanduseResidential(MapFeatureData feature) {
+        PropertyManager.Landuse landuse = feature.Properties.landuse;
+        return landuse == PropertyManager.Landuse.RESIDENTIAL || landuse == PropertyManager.Landuse.CEMETERY || landuse == PropertyManager.Landuse.INDUSTRIAL ||
+          landuse == PropertyManager.Landuse.COMMERCIAL ||  landuse == PropertyManager.Landuse.SQUARE || landuse == PropertyManager.Landuse.CONSTRUCTION ||
+          landuse == PropertyManager.Landuse.MILITARY || landuse == PropertyManager.Landuse.QUARRY || landuse == PropertyManager.Landuse.BROWNFIELD;
+    }
+
+    public static bool isLandusePlain(MapFeatureData feature) {
+        PropertyManager.Landuse landuse = feature.Properties.landuse;
+        return landuse == PropertyManager.Landuse.FARM || landuse == PropertyManager.Landuse.MEADOW || landuse == PropertyManager.Landuse.GRASS ||
+          landuse == PropertyManager.Landuse.GREENFIELD || landuse == PropertyManager.Landuse.RECREATION_GROUND || landuse == PropertyManager.Landuse.WINTER_SPORTS ||
+          landuse == PropertyManager.Landuse.ALLOTMENTS;
+    }
+
+    public static bool isWater(MapFeatureData feature) {
+        PropertyManager.Landuse landuse = feature.Properties.landuse;
+        return landuse == PropertyManager.Landuse.RESERVOIR || landuse == PropertyManager.Landuse.BASIN;
+    }
+
+    public static bool isBuilding(MapFeatureData feature) {
+      return feature.Properties.building != PropertyManager.Building.UNSET && feature.Type == GeometryType.Polygon;
+    }
+
+    public static bool isLeisure(MapFeatureData feature) {
+      return feature.Properties.leisure != PropertyManager.Leisure.UNSET && feature.Type == GeometryType.Polygon;
+    }
+
+    public static bool isAmenity(MapFeatureData feature) {
+      return feature.Properties.amenity != PropertyManager.Amenity.UNSET && feature.Type == GeometryType.Polygon;
+    }
+}
+
+public struct Railway : BaseShape
+{
+    public int ZIndex { get; set; } = 45;
+    public bool IsPolygon { get; set; }
+    public PointF[] ScreenCoordinates { get; set; }
+
+    public void Render(IImageProcessingContext context)
     {
-        var canvas = new Image<Rgba32>(width, height);
-
-        // Calculate the scale for each pixel, essentially applying a normalization
-        var scaleX = canvas.Width / (boundingBox.MaxX - boundingBox.MinX);
-        var scaleY = canvas.Height / (boundingBox.MaxY - boundingBox.MinY);
-        var scale = Math.Min(scaleX, scaleY);
-
-        // Background Fill
-        canvas.Mutate(x => x.Fill(Color.White));
-        while (shapes.Count > 0)
+        var penA = new Pen(Color.DarkGray, 2.0f);
+        var penB = new Pen(Color.LightGray, 1.2f, new[]
         {
-            var entry = shapes.Dequeue();
-            entry.TranslateAndScale(boundingBox.MinX, boundingBox.MinY, scale, canvas.Height);
-            canvas.Mutate(x => entry.Render(x));
-        }
-
-        return canvas;
+            2.0f, 4.0f, 2.0f
+        });
+        context.DrawLines(penA, ScreenCoordinates);
+        context.DrawLines(penB, ScreenCoordinates);
     }
 
-    public struct BoundingBox
+    public Railway(ReadOnlySpan<Coordinate> c)
     {
-        public float MinX;
-        public float MaxX;
-        public float MinY;
-        public float MaxY;
+        IsPolygon = false;
+        ScreenCoordinates = new PointF[c.Length];
+        for (var i = 0; i < c.Length; i++)
+            ScreenCoordinates[i] = new PointF((float)MercatorProjection.lonToX(c[i].Longitude),
+                (float)MercatorProjection.latToY(c[i].Latitude));
+    }
+
+    public static bool isRailway(MapFeatureData feature) {
+      return feature.Properties.railway != PropertyManager.Railway.UNSET;
+    }
+}
+
+public struct PopulatedPlace : BaseShape
+{
+    public int ZIndex { get; set; } = 60;
+    public bool IsPolygon { get; set; }
+    public PointF[] ScreenCoordinates { get; set; }
+    public string Name { get; set; }
+    public bool ShouldRender { get; set; }
+
+    public void Render(IImageProcessingContext context)
+    {
+        if (!ShouldRender)
+        {
+            return;
+        }
+        var font = SystemFonts.Families.First().CreateFont(12, FontStyle.Bold);
+        context.DrawText(Name, font, Color.Black, ScreenCoordinates[0]);
+    }
+
+    public PopulatedPlace(ReadOnlySpan<Coordinate> c, MapFeatureData feature)
+    {
+        IsPolygon = false;
+        ScreenCoordinates = new PointF[c.Length];
+        for (var i = 0; i < c.Length; i++)
+            ScreenCoordinates[i] = new PointF((float)MercatorProjection.lonToX(c[i].Longitude),
+                (float)MercatorProjection.latToY(c[i].Latitude));
+        var name = feature.Properties.name;
+
+        if (feature.Label.IsEmpty)
+        {
+            ShouldRender = false;
+            Name = "Unknown";
+        }
+        else
+        {
+            Name = string.IsNullOrWhiteSpace(name) ? feature.Label.ToString() : name;
+            ShouldRender = true;
+        }
+    }
+
+    public static bool isPopulatedPlace(MapFeatureData feature)
+    {
+        // https://wiki.openstreetmap.org/wiki/Key:place
+        if (feature.Type != GeometryType.Point)
+        {
+            return false;
+        }
+        PropertyManager.Place place = feature.Properties.place;
+        return place == PropertyManager.Place.CITY || place == PropertyManager.Place.TOWN || place == PropertyManager.Place.LOCALITY || place == PropertyManager.Place.HAMLET;
+    }
+}
+
+public struct Border : BaseShape
+{
+    public int ZIndex { get; set; } = 30;
+    public bool IsPolygon { get; set; }
+    public PointF[] ScreenCoordinates { get; set; }
+
+    public void Render(IImageProcessingContext context)
+    {
+        var pen = new Pen(Color.Gray, 2.0f);
+        context.DrawLines(pen, ScreenCoordinates);
+    }
+
+    public Border(ReadOnlySpan<Coordinate> c)
+    {
+        IsPolygon = false;
+        ScreenCoordinates = new PointF[c.Length];
+        for (var i = 0; i < c.Length; i++)
+            ScreenCoordinates[i] = new PointF((float)MercatorProjection.lonToX(c[i].Longitude),
+                (float)MercatorProjection.latToY(c[i].Latitude));
+    }
+
+    public static bool isBorder(MapFeatureData feature)
+    {
+        return feature.Properties.boundary == PropertyManager.Boundary.ADMINISTRATIVE && feature.Properties.adminLevel == PropertyManager.AdminLevel.LEVEL_2;
+    }
+}
+
+public struct Waterway : BaseShape
+{
+    public int ZIndex { get; set; } = 40;
+    public bool IsPolygon { get; set; }
+    public PointF[] ScreenCoordinates { get; set; }
+
+    public void Render(IImageProcessingContext context)
+    {
+        if (!IsPolygon)
+        {
+            var pen = new Pen(Color.LightBlue, 1.2f);
+            context.DrawLines(pen, ScreenCoordinates);
+        }
+        else
+        {
+            context.FillPolygon(Color.LightBlue, ScreenCoordinates);
+        }
+    }
+    
+    public static bool isWaterway(MapFeatureData feature)
+    {
+      return feature.Properties.water != PropertyManager.Water.UNSET && feature.Type != GeometryType.Point;
+    }
+
+    public Waterway(ReadOnlySpan<Coordinate> c, bool isPolygon = false)
+    {
+        IsPolygon = isPolygon;
+        ScreenCoordinates = new PointF[c.Length];
+        for (var i = 0; i < c.Length; i++)
+            ScreenCoordinates[i] = new PointF((float)MercatorProjection.lonToX(c[i].Longitude),
+                (float)MercatorProjection.latToY(c[i].Latitude));
+    }
+}
+
+public struct Road : BaseShape
+{
+    public int ZIndex { get; set; } = 50;
+    public bool IsPolygon { get; set; }
+    public PointF[] ScreenCoordinates { get; set; }
+
+    public void Render(IImageProcessingContext context)
+    {
+        if (!IsPolygon)
+        {
+            var pen = new Pen(Color.Coral, 2.0f);
+            var pen2 = new Pen(Color.Yellow, 2.2f);
+            context.DrawLines(pen2, ScreenCoordinates);
+            context.DrawLines(pen, ScreenCoordinates);
+        }
+    }
+
+    public Road(ReadOnlySpan<Coordinate> c, bool isPolygon = false)
+    {
+        IsPolygon = isPolygon;
+        ScreenCoordinates = new PointF[c.Length];
+        for (var i = 0; i < c.Length; i++)
+            ScreenCoordinates[i] = new PointF((float)MercatorProjection.lonToX(c[i].Longitude),
+                (float)MercatorProjection.latToY(c[i].Latitude));
+    }
+
+    public static bool isRoad(MapFeatureData feature)
+    {
+        return feature.Properties.highway != PropertyManager.Highway.OTHER && feature.Properties.highway != PropertyManager.Highway.UNSET;
+    }
+    
+}
+
+public interface BaseShape
+{
+    public int ZIndex { get; set; }
+    public bool IsPolygon { get; set; }
+    public PointF[] ScreenCoordinates { get; set; }
+
+    public void Render(IImageProcessingContext context);
+
+    public void TranslateAndScale(float minX, float minY, float scale, float height)
+    {
+        for (var i = 0; i < ScreenCoordinates.Length; i++)
+        {
+            var coord = ScreenCoordinates[i];
+            var newCoord = new PointF((coord.X + minX * -1) * scale, height - (coord.Y + minY * -1) * scale);
+            ScreenCoordinates[i] = newCoord;
+        }
     }
 }
